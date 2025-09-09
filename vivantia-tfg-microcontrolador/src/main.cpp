@@ -1,17 +1,17 @@
+#include <Arduino.h>
 #include <MKRWAN.h>
 #include <credenciales.h>
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
-#include <Arduino.h>
 
 /* ───── Config ───── */
 #define REGION            EU868
-#define LED_PIN           7     // Control de encendido/apagado de la bomba
-#define PUMP_CTRL_PIN     8     // Control de absorción de agua
+#define LED_PIN           7     // Control bomba (ON/OFF)
+#define PUMP_CTRL_PIN     8     // Control absorción de agua
 #define CTRL_FPORT        3
-#define DATA_FPORT        2          // ← Telemetría en puerto 2
-#define HEARTBEAT_MS      10000UL    // uplinks vacíos periódicos (10 s)
-#define DATA_INTERVAL_MS  60000UL    // telemetría cada 2 minutos
+#define DATA_FPORT        2      // Telemetría en puerto 2
+#define HEARTBEAT_MS      10000UL
+#define DATA_INTERVAL_MS  60000UL
 
 // DHT11
 #define DHTPIN   6
@@ -20,12 +20,23 @@ DHT dht(DHTPIN, DHTTYPE);
 
 // Humedad de suelo
 #define SOIL_MOISTURE_PIN A0
-#define SOIL_MOISTURE_DRY 300
-#define SOIL_MOISTURE_WET 700
+#define SOIL_MOISTURE_DRY 880
+#define SOIL_MOISTURE_WET 530
 
-LoRaModem modem(Serial1);
+// Módem LoRa interno del MKR WAN
+LoRaModem modem;
+
+// Tiempos
 unsigned long lastDataTx = 0;
 unsigned long lastHeartbeat = 0;
+
+/* Espera opcional al puerto serie (solo en DEBUG, con timeout) */
+static void waitForSerial(unsigned long ms = 1500) {
+#ifdef SERIAL_DEBUG
+  unsigned long t0 = millis();
+  while (!Serial && (millis() - t0) < ms) { /* nop */ }
+#endif
+}
 
 /* Uplink corto de control (ack tras downlink) */
 void sendUplinkStatus() {
@@ -79,7 +90,7 @@ void sendTelemetry() {
   modem.beginPacket();
   modem.write(payload, 6);
   int err = modem.endPacket(false);
-  if (err > 0) Serial.println("Uplink enviado al (FPort 2)");
+  if (err > 0) Serial.println("Uplink enviado (FPort 2)");
   else         Serial.println("❌ Error al enviar telemetría");
 
   modem.setPort(CTRL_FPORT);
@@ -87,7 +98,7 @@ void sendTelemetry() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial);
+  waitForSerial(); // no bloquea si no hay monitor
 
   dht.begin();
   pinMode(SOIL_MOISTURE_PIN, INPUT);
@@ -96,20 +107,30 @@ void setup() {
 
   if (!modem.begin(REGION)) {
     Serial.println("No se pudo iniciar el módulo LoRa");
-    while (1);
+    while (1) { delay(1000); }
   }
 
   Serial.print("DevEUI: ");
   Serial.println(modem.deviceEUI());
 
-  if (!modem.joinOTAA(appEui, appKey)) {
-    Serial.println("Falló el join OTAA");
-    while (1);
+  // Join OTAA con reintentos
+  bool joined = false;
+  for (int i = 0; i < 5 && !joined; i++) {
+    if (modem.joinOTAA(appEui, appKey)) {
+      joined = true;
+      Serial.println("¡Unido a la red!");
+    } else {
+      Serial.println("Falló el join OTAA. Reintentando en 5 s...");
+      delay(5000);
+    }
   }
-  Serial.println("¡Unido a la red!");
+  if (!joined) {
+    Serial.println("No se pudo unir a la red. Revisa AppEUI/AppKey/gateway.");
+    // Si quieres, reintenta en loop() periódicamente.
+  }
 
   modem.setADR(true);
-  modem.dataRate(5); 
+  modem.dataRate(5);
   modem.setPort(CTRL_FPORT);
 
   // Uplink inmediato al arrancar
@@ -121,13 +142,13 @@ void setup() {
 void loop() {
   modem.poll(); // Gestiona RX/ventanas
 
-  // Telemetría cada 2 min
+  // Telemetría periódica
   if (millis() - lastDataTx >= DATA_INTERVAL_MS) {
     lastDataTx = millis();
     sendTelemetry();
   }
 
-  // Heartbeats cada 10s
+  // Heartbeats
   if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = millis();
     modem.setPort(CTRL_FPORT);
@@ -154,6 +175,6 @@ void loop() {
     }
 
     delay(500);
-    sendUplinkStatus(); 
+    sendUplinkStatus();
   }
 }
